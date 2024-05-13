@@ -1,0 +1,1133 @@
+---
+title: "Indiana COVID-19 Data Analysis"
+author: "Keo Pangan"
+date: "2024-02-29"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load library, include = FALSE}
+#loading in libraries
+library(tidyverse)
+library(lubridate)
+library(mgcv)
+library(ggplot2)
+library(plotly)
+library(scales)
+library(datetime)
+library(random)
+library(zoo)
+library(aweek)
+library(CGPfunctions)
+library(dplyr)
+library(psych)
+library(ggridges)
+library(tidyr)
+library(sjPlot)
+library(MASS)
+library(readxl)
+library(readr)
+```
+
+```{r insert files, include = FALSE}
+#read the cases file
+IN_COVID_19_Cases <- read_excel("Downloads/covid_report_county_date.xlsx")
+
+#read the vaccinations file
+IN_COVID_19_Vaccinations <- read_csv("Downloads/county-vaccinations-by-date.csv")
+
+#read the population file
+ACS2020_IN_County_Population <- read_csv("Downloads/ACS2020 In County Ppopulation.csv")
+
+# input the RUCA codes: metro, nonmetro, rural, etc.
+IN_RUCA_2023 <- read_excel("Downloads/Ruralurbancontinuumcodes2023.xlsx")
+```
+
+```{r creating and cleaning up date columns and titles, include = FALSE}
+#change titles from uppercase to lowercase
+names(IN_COVID_19_Cases) <- tolower(names(IN_COVID_19_Cases))
+names(ACS2020_IN_County_Population) <- tolower(names(ACS2020_IN_County_Population))
+names(IN_COVID_19_Vaccinations) <- tolower(names(IN_COVID_19_Vaccinations))
+
+#change the date from characters to numbers
+IN_COVID_19_Cases$date <- as.Date(IN_COVID_19_Cases$date)
+IN_COVID_19_Vaccinations$date <- as.Date(IN_COVID_19_Vaccinations$date)
+
+#rename county to county_name for uniformity in the vaccinations spreadsheet
+IN_COVID_19_Vaccinations <- dplyr::rename(IN_COVID_19_Vaccinations, county_name = county)
+
+#convert county name to factor
+IN_COVID_19_Cases$county_name <- as.factor(IN_COVID_19_Cases$county_name)
+IN_COVID_19_Vaccinations$county_name <- as.factor(IN_COVID_19_Vaccinations$county_name)
+```
+
+```{r add population & normalize the data by using population, include  = FALSE}
+#create columns for fips code ~ easier to join the spreadsheets together
+names(IN_COVID_19_Cases)[names(IN_COVID_19_Cases) == "location_id"] <- "fips"
+IN_COVID_19_Cases$fips <- as.numeric(IN_COVID_19_Cases$fips)
+
+IN_COVID_19_Vaccinations$fips <- as.numeric(IN_COVID_19_Vaccinations$fips)
+IN_COVID_19_Cases <- cbind(IN_COVID_19_Cases, population = ACS2020_IN_County_Population$pop)
+
+#add population counts by county at the end of these spreadsheets
+# remove duplicate columns
+IN_COVID_19_Cases_Population <- merge(x = IN_COVID_19_Cases, y = ACS2020_IN_County_Population, by = "fips", all.x = TRUE)
+IN_COVID_19_Cases_Population <- IN_COVID_19_Cases_Population[-c(16:18)]
+
+IN_COVID_19_Vaccinations_Population <- merge(x = IN_COVID_19_Vaccinations, y = ACS2020_IN_County_Population, by = "fips", all.x = TRUE)
+IN_COVID_19_Vaccinations_Population <- IN_COVID_19_Vaccinations_Population[-c(20:21)]
+
+#normalize cases, deaths, tests, fully-vaccinated by population
+IN_COVID_19_Cases_Population$normalized_covid_count <- 
+  (IN_COVID_19_Cases_Population$covid_count / IN_COVID_19_Cases_Population$pop) * 100000
+
+IN_COVID_19_Vaccinations_Population$normalized_fv_daily <- 
+  (IN_COVID_19_Vaccinations_Population$fully_vaccinated / IN_COVID_19_Vaccinations_Population$pop) * 100000
+
+#order spreadsheet of vaccinations for cumulative vaccinations
+IN_COVID_19_Vaccinations_Population <- IN_COVID_19_Vaccinations_Population %>% arrange(county_name, date)
+
+#add partial vaccinations, cumulative vaccinations, and cumulative cases in the spreadsheet
+IN_COVID_19_Vaccinations_Population$total_pfv_by_county_daily <- (IN_COVID_19_Vaccinations_Population$fully_vaccinated - IN_COVID_19_Vaccinations_Population$second_dose_administered + IN_COVID_19_Vaccinations_Population$first_dose_administered)
+IN_COVID_19_Vaccinations_Population$total_normalized_pfv_by_county_daily <- (IN_COVID_19_Vaccinations_Population$total_pfv_by_county_daily / IN_COVID_19_Vaccinations_Population$pop * 100000)
+
+IN_COVID_19_Vaccinations_Population <- IN_COVID_19_Vaccinations_Population %>% group_by(county_name) %>% dplyr::mutate(cumulative_fv_by_county = cumsum(replace_na(fully_vaccinated, 0)))
+IN_COVID_19_Vaccinations_Population$normalized_cumulative_fv_by_county <- (IN_COVID_19_Vaccinations_Population$cumulative_fv_by_county / IN_COVID_19_Vaccinations_Population$pop * 100000)
+
+IN_COVID_19_Vaccinations_Population <- IN_COVID_19_Vaccinations_Population %>% group_by(county_name) %>% dplyr::mutate(cumulative_pfv_by_county_daily = cumsum(replace_na(total_pfv_by_county_daily, 0)))
+IN_COVID_19_Vaccinations_Population$normalized_cumulative_pfv_by_county_daily <- (IN_COVID_19_Vaccinations_Population$cumulative_pfv_by_county_daily / IN_COVID_19_Vaccinations_Population$pop * 100000)
+
+# cumulative cases / deaths by county
+IN_COVID_19_Cases_Population <- IN_COVID_19_Cases_Population %>% group_by(county_name) %>% dplyr::mutate(cumulative_cases_by_county = cumsum(replace_na(covid_count, 0)))
+IN_COVID_19_Cases_Population$normalized_cumulative_cases_by_county <- (IN_COVID_19_Cases_Population$cumulative_cases_by_county / IN_COVID_19_Cases_Population$pop * 100000)
+
+IN_COVID_19_Cases_Population <- IN_COVID_19_Cases_Population %>% group_by(county_name) %>% dplyr::mutate(cumulative_deaths_by_county = cumsum(replace_na(covid_deaths, 0)))
+IN_COVID_19_Cases_Population$normalized_cumulative_deaths_by_county <- (IN_COVID_19_Cases_Population$cumulative_deaths_by_county / IN_COVID_19_Cases_Population$pop * 100000)
+```
+
+```{r add region column based on county, include = FALSE}
+IN_COVID_19_Cases_Population <- 
+  IN_COVID_19_Cases_Population %>% 
+  mutate(region = ifelse(fips == 18089 | fips == 18127 | fips == 18091 | fips == 18111 | fips == 18073, '1',
+                         ifelse(fips == 18141 | fips == 18039 | fips == 18149 | fips == 18099 | fips == 18085 | fips == 18131 | fips == 18049, '2',
+                                ifelse(fips == 18087 | fips == 18151 | fips == 18113 | fips == 18033 | fips == 18183 | fips == 18003 | fips == 18103 | fips == 18169 | fips == 18069 | fips == 18179 | fips == 18001, '3', 
+                                       ifelse(fips == 18007 | fips == 18181 | fips == 18017 | fips == 18171 | fips == 18157 | fips == 18015 | fips == 18045 | fips == 18107 | fips == 18023, '4',
+                                              ifelse(fips == 18011 | fips == 18057 | fips == 18063 | fips == 18097 | fips == 18059 | fips == 18109 | fips == 18081 | fips == 18145, '5',
+                                                     ifelse(fips == 18067 | fips == 18053 | fips == 18009 | fips == 18075 | fips == 18159 | fips == 18095 | fips == 18035 | fips == 18135 | fips == 18065 | fips == 18177 | fips == 18139 | fips == 18041 | fips == 18161, '6',
+                                                            ifelse(fips == 18165 | fips == 18121 | fips == 18133 | fips == 18167 | fips == 18021 | fips == 18119 | fips == 18153 | fips == 18055, '7',
+                                                                   ifelse(fips == 18105 | fips == 18013 | fips == 18005 | fips == 18093 | fips == 18071 | fips == 18117 | fips == 18175, '8',
+                                                                          ifelse(fips == 18031 | fips == 18047 | fips == 18079 | fips == 18137 | fips == 18029 | fips == 18143 | fips == 18077 | fips == 18115 | fips == 18155 | fips == 18019 | fips == 18043 | fips == 18061, '9', 
+                                                                                 ifelse(fips == 18083 | fips == 18027 | fips == 18101 | fips == 18051 | fips == 18125 | fips == 18037 | fips == 18025 | fips == 18129 | fips == 18163 | fips == 18173 | fips == 18147 | fips == 18123, '10', 'NA')))))))))))
+                        
+IN_COVID_19_Cases_Population$region <- as.factor(IN_COVID_19_Cases_Population$region)
+IN_COVID_19_Vaccinations_Population$region <- as.factor(IN_COVID_19_Vaccinations_Population$region)
+```
+
+
+```{r RUCA setup, include = FALSE}
+IN_RUCA_2023 <- IN_RUCA_2023 %>% dplyr::filter(State == "IN")
+
+IN_RUCA_2023$RUCA <- with(IN_RUCA_2023, ifelse(RUCC_2023 < 4, 'Metro',
+                    ifelse(RUCC_2023 == 4 | RUCC_2023 == 6, 'Non-Metro', 'Rural')))
+
+IN_RUCA_2023$RUCC_2023 <- as.factor(IN_RUCA_2023$RUCC_2023)
+IN_RUCA_2023$FIPS <- as.numeric(IN_RUCA_2023$FIPS)
+IN_RUCA_2023$RUCA <- as.factor(IN_RUCA_2023$RUCA)
+```
+
+```{r manipulate dataset, include = FALSE}
+IN_COVID_19_Cases_Population <- left_join(x = IN_COVID_19_Cases_Population, y = IN_RUCA_2023, by = c("fips" = "FIPS"))
+IN_COVID_19_Cases_Population <- IN_COVID_19_Cases_Population[-c(23:26)]
+
+IN_COVID_19_Vaccinations_Population <- left_join(x = IN_COVID_19_Vaccinations_Population, y = IN_RUCA_2023, by = c("fips" = "FIPS"))
+IN_COVID_19_Vaccinations_Population <- IN_COVID_19_Vaccinations_Population[-c(28:31)]
+
+# add population ranks within the dataset
+ACS2020_IN_County_Population$pop_rank <- rank(-ACS2020_IN_County_Population$pop)
+IN_COVID_19_Cases_Population <- left_join(x = IN_COVID_19_Cases_Population, y = ACS2020_IN_County_Population, by = c("fips", "pop"))
+# remove countyname and geo_id
+IN_COVID_19_Cases_Population <- IN_COVID_19_Cases_Population[-c(25:26)]
+
+# merge population rank data with the vaccination dataset
+IN_COVID_19_Vaccinations_Population <- left_join(x = IN_COVID_19_Vaccinations_Population, y = ACS2020_IN_County_Population, by = c("fips", "pop"))
+IN_COVID_19_Vaccinations_Population <- IN_COVID_19_Vaccinations_Population[-c(30:31)]
+```
+
+```{r create population analysis dataset, include = FALSE}
+#select the age & gender data from the ACS
+population_by_age <- read_csv("Downloads/ACSST5Y2020.S0101_2022-06-06T124929/ACSST5Y2020.S0101_data_with_overlays_2022-04-28T143907.csv")
+
+ACS_2020_Population_Age <- dplyr::select(population_by_age, c(1, 2, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31, 33, 35, 37, 39, 41, 51, 155, 307))
+colnames(ACS_2020_Population_Age) <- c('GEO_ID', 'Name', 'Total Pop', 'Pop < 5', 'Pop 5-9', 'Pop 10-14', 'Pop 15-19', 'Pop 20-24', 'Pop 25-29', 'Pop 30-34', 'Pop 35-39', 'Pop 40-44', 'Pop 45-49', 'Pop 50-54', 'Pop 55-59', 'Pop 60-64', 'Pop 65-69', 'Pop 70-74', 'Pop 75-79', 'Pop 80-84', 'Pop > 85', 'Pop 5-14', 'Pop > 16', 'Male Pop', 'Female Pop')
+ACS_2020_Population_Age <- ACS_2020_Population_Age[-1, ]
+
+#select the racial data from the ACS
+population_by_race <- read_csv("Downloads/ACSDP5Y2020.DP05_2022-06-29T161040/ACSDP5Y2020.DP05_data_with_overlays_2022-06-29T161035.csv")
+
+population_by_race <- population_by_race %>% dplyr::select(GEO_ID, NAME, everything())
+ACS_2020_Population_Race <- dplyr::select(population_by_race, c(1, 2, 131, 135, 139, 147, 151, 155, 175, 207, 227, 283, 303))
+colnames(ACS_2020_Population_Race) <- c('GEO_ID', 'Name', 'Total Pop', 'One Race Pop', 'Two or More Races Pop', 'White Pop', 'Black or African-American Pop', 'American Indian & Alaska Native Pop', 'Asian Pop', 'Native Hawaiian or Pacific Islander Pop', 'Other Race', 'Hispanic or Latino', 'Not Hispanic or Latino')
+ACS_2020_Population_Race <- ACS_2020_Population_Race[-1, ]
+
+#select the youth population data from households ~ ACS
+population_youth <- read_csv("Downloads/ACSDT5Y2020.B09001_2022-06-30T133234/ACSDT5Y2020.B09001_data_with_overlays_2022-06-30T133229.csv")
+
+population_youth <- population_youth %>% dplyr::select(GEO_ID, NAME, everything())
+ACS_2020_Population_Youth <- dplyr::select(population_youth, c(1, 2, 3, 11, 13, 15, 17, 19))
+colnames(ACS_2020_Population_Youth) <- c('GEO_ID', 'Name', 'Total Pop < 18', 'Pop = 5', 'Pop 6-8', 'Pop 9-11', 'Pop 12-14', 'Pop 15-17')
+ACS_2020_Population_Youth <- ACS_2020_Population_Youth[-1, ]
+
+# merge the population demographics together
+ACS_2020_Population <- merge(ACS_2020_Population_Age, ACS_2020_Population_Race, by = c('GEO_ID', 'Name', 'Total Pop'))
+ACS_2020_Population <- merge(ACS_2020_Population, ACS_2020_Population_Youth, by = c('GEO_ID', 'Name'))
+ACS_2020_Population <- cbind(ACS_2020_Population, ACS2020_IN_County_Population$fips)
+ACS_2020_Population <- ACS_2020_Population %>% dplyr::select(`ACS2020_IN_County_Population$fips`, everything())
+colnames(ACS_2020_Population)[1] <- "fips"
+
+#make the population counts numeric
+ACS_2020_Population[4:42] <- lapply(ACS_2020_Population[4:42], as.numeric)
+
+#create the 5-11, 12-15, 16-19, 80+ columns
+ACS_2020_Population$`Pop 5-11` <- ACS_2020_Population$`Pop = 5` + ACS_2020_Population$`Pop 6-8` + ACS_2020_Population$`Pop 9-11`
+ACS_2020_Population$`Pop = 15` <- ACS_2020_Population$`Total Pop` - ACS_2020_Population$`Pop > 16` - ACS_2020_Population$`Pop < 5` - ACS_2020_Population$`Pop 5-14`
+ACS_2020_Population$`Pop 12-15` <- ACS_2020_Population$`Pop = 15` + ACS_2020_Population$`Pop 12-14`
+ACS_2020_Population$`Pop 16-19` <- ACS_2020_Population$`Pop 15-19` - ACS_2020_Population$`Pop = 15`
+ACS_2020_Population$`Pop 80+` <- ACS_2020_Population$`Pop 80-84` + ACS_2020_Population$`Pop > 85`
+
+#select columns that match the data in the COVID vaccine spreadsheets
+IN_Age_Race <- dplyr::select(ACS_2020_Population, c(1, 3, 4, 43, 44, 46, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 45, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36))
+colnames(IN_Age_Race)[4] <- "Pop 05-11"
+
+#remove the datasets that have been merged to create IN_Demographics dataset
+rm("ACS_2020_Population_Age", "ACS_2020_Population_Race", "ACS_2020_Population_Youth", "ACS_2020_Population") #, #"ACS2020_IN_County_Population")
+rm("IN_RUCA_2023", "population_by_age", "population_by_race", "population_youth")
+```
+
+```{r creating the analyzable dataset: IN_COVID_19_Data, include = FALSE}
+IN_COVID_19_Data <- full_join(x = IN_COVID_19_Cases_Population, y = IN_COVID_19_Vaccinations_Population, by = c("fips", "county_name", "date", "pop", "Description", "RUCA", "pop_rank", "region"))
+
+#order spreadsheet for cumulative calculations
+IN_COVID_19_Data <- IN_COVID_19_Data %>% arrange(date, county_name)
+
+# fix next time lol
+colnames(IN_COVID_19_Data)[23] <- "description"
+colnames(IN_COVID_19_Data)[3] <- "total_cases_by_county_daily"
+colnames(IN_COVID_19_Data)[18] <- "total_normalized_cases_by_county_daily"
+colnames(IN_COVID_19_Data)[5] <- "total_deaths_by_county_daily"
+colnames(IN_COVID_19_Data)[20] <- "total_normalized_deaths_by_county_daily"
+colnames(IN_COVID_19_Data)[30] <- "total_fv_by_county_daily"
+colnames(IN_COVID_19_Data)[41] <- "total_normalized_fv_by_county_daily"
+
+#delete rows that have unknown county or out-of-state vaccination data
+IN_COVID_19_Data <- IN_COVID_19_Data[IN_COVID_19_Data$county_name != "Unknown", ]
+IN_COVID_19_Data <- IN_COVID_19_Data[IN_COVID_19_Data$county_name != "Out of State", ]
+
+#remove moving averages from dataset
+IN_COVID_19_Data <- IN_COVID_19_Data[-c(4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 26:29, 31:40)]
+```
+
+```{r cumulative vaccinations + miscellaneous columns, include = FALSE}
+#cumulative vaccination proportions
+IN_COVID_19_Data <- IN_COVID_19_Data %>% dplyr::mutate(prop_cumulative_fv_by_county = normalized_cumulative_fv_by_county/100000)
+IN_COVID_19_Data <- IN_COVID_19_Data %>% dplyr::mutate(prop_cumulative_pfv_by_county = normalized_cumulative_pfv_by_county_daily/100000)
+```
+
+```{r add education and income into regression equation, include = FALSE}
+#reading in education data
+population_by_education <- read_csv("Downloads/ACSST5Y2020.S1501_2022-07-06T132232/ACSST5Y2020.S1501_data_with_overlays_2022-07-06T132227.csv")
+IN_Ed <- dplyr::select(population_by_education, c(1, 2, 139, 159))
+IN_Ed[3:4] <- lapply(IN_Ed[3:4], as.numeric)
+IN_Ed <- IN_Ed[-1,]
+IN_Ed$`%CollegeEd` <- (IN_Ed$S1501_C02_005E + IN_Ed$S1501_C02_015E)/100
+IN_Ed = dplyr::select(IN_Ed, -3:-4)
+
+#reading in household income data
+population_by_mhi <- read_csv("Downloads/ACSST5Y2020.S1901_2022-07-06T132736/ACSST5Y2020.S1901_data_with_overlays_2022-07-06T132730.csv")
+IN_HH <- dplyr::select(population_by_mhi, c(1, 2, 25))
+IN_HH <- IN_HH[-1,]
+IN_HH[3] <- lapply(IN_HH[3], as.numeric)
+colnames(IN_HH)[3] <- "MedianHouseholdIncome"
+
+#reading in poverty data
+population_by_poverty <- read_csv("Downloads/ACSST5Y2020.S1701_2022-07-12T095846/ACSST5Y2020.S1701_data_with_overlays_2022-07-12T095823.csv")
+IN_Po <- dplyr::select(population_by_poverty, c(1, 2, 247))
+IN_Po <- IN_Po[-1,]
+IN_Po[3] <- lapply(IN_Po[3], as.numeric)
+colnames(IN_Po)[3] <- "%BelowPoverty"
+IN_Po$`%BelowPoverty` <- IN_Po$`%BelowPoverty`/100
+
+#prepare gender data
+population_by_gender <- read_csv("Downloads/ACSDP5Y2020.DP05_2022-06-29T161040/ACSDP5Y2020.DP05_data_with_overlays_2022-06-29T161035.csv")
+IN_Ge <- dplyr::select(population_by_gender, c(1, 2, 5))
+IN_Ge <- IN_Ge[-1,]
+IN_Ge[1:3] <- lapply(IN_Ge[1:3], as.numeric)
+IN_Ge$`%Male` <- IN_Ge$DP05_0002E / IN_Ge$DP05_0001E
+IN_Ge = dplyr::select(IN_Ge, -1:-3)
+
+#prepare racial data
+population_by_race <- read_csv("Downloads/ACSDP5Y2020.DP05_2022-06-29T161040/ACSDP5Y2020.DP05_data_with_overlays_2022-06-29T161035.csv")
+IN_Ra <- dplyr::select(population_by_race, c(1, 2, 281, 305, 309, 313, 317, 321))
+IN_Ra <- IN_Ra[-1,]
+IN_Ra[1] <- lapply(IN_Ra[1], as.numeric)
+IN_Ra[3:8] <- lapply(IN_Ra[3:8], as.numeric)
+IN_Ra$`%Hispanic` <- IN_Ra$DP05_0071E / IN_Ra$DP05_0001E
+IN_Ra$`%NHWhite` <- IN_Ra$DP05_0077E / IN_Ra$DP05_0001E
+IN_Ra$`%NHBlack` <- IN_Ra$DP05_0078E / IN_Ra$DP05_0001E
+IN_Ra$`%NH_AI/AN` <- IN_Ra$DP05_0079E / IN_Ra$DP05_0001E
+IN_Ra$`%NHAsian` <- IN_Ra$DP05_0080E / IN_Ra$DP05_0001E
+IN_Ra$`%NH_NH/PI` <- IN_Ra$DP05_0081E / IN_Ra$DP05_0001E
+IN_Ra = dplyr::select(IN_Ra, -1:-8)
+
+#prepare age data ~ use population counts then make percentages for the 18-60 category
+population_by_age <- read_csv("Downloads/ACSST5Y2020.S0101_2022-06-06T124929/ACSST5Y2020.S0101_data_with_overlays_2022-04-28T143907.csv")
+IN_Ag <- dplyr::select(population_by_age, c(1, 2, 3, 21, 23, 25, 27, 53, 57, 121, 133))
+IN_Ag <- IN_Ag[-1,]
+IN_Ag[3:11] <- lapply(IN_Ag[3:11], as.numeric)
+IN_Ag$`% 18-39` <- (IN_Ag$S0101_C01_026E - IN_Ag$S0101_C01_028E - IN_Ag$S0101_C01_010E - IN_Ag$S0101_C01_011E - IN_Ag$S0101_C01_012E -IN_Ag$S0101_C01_013E)/(IN_Ag$S0101_C01_001E)
+IN_Ag$`18-39` <- (IN_Ag$S0101_C01_026E - IN_Ag$S0101_C01_028E - IN_Ag$S0101_C01_010E - IN_Ag$S0101_C01_011E - IN_Ag$S0101_C01_012E -IN_Ag$S0101_C01_013E)
+IN_Ag$`% 40-59` <- (IN_Ag$S0101_C01_026E - IN_Ag$S0101_C01_028E - IN_Ag$`18-39`)/(IN_Ag$S0101_C01_001E)
+IN_Ag$`% Under 18` <- IN_Ag$S0101_C02_022E / 100
+IN_Ag$`% Over 60` <- IN_Ag$S0101_C02_028E / 100
+IN_Ag <- dplyr::select(IN_Ag, -3:-11, -13)
+
+#join all the datasets together
+df3 <- cbind(IN_Ge, IN_Ra)
+df4 <- merge(IN_Ag, IN_Ed, by = c("GEO_ID", "NAME"))
+df5 <- merge(IN_HH, IN_Po, by = c("GEO_ID", "NAME"))
+IN_Demographics <- cbind(df4, df3)
+IN_Demographics <- merge(IN_Demographics, df5, by = c("GEO_ID", "NAME"))
+
+#add the Hispanic, NH White, NH Non-White Categories
+IN_Demographics$`%NHOther` <- IN_Demographics$`%NH_AI/AN` + IN_Demographics$`%NHAsian` + IN_Demographics$`%NH_NH/PI`
+IN_Demographics$`%OtherRace` <- IN_Demographics$`%NH_AI/AN` + IN_Demographics$`%NHAsian` + IN_Demographics$`%NH_NH/PI` + IN_Demographics$`%NHBlack` + IN_Demographics$`%Hispanic`
+
+IN_Demographics <- IN_Demographics %>% arrange(NAME)
+```
+
+```{r add other variables to analysis, include = FALSE}
+library(stringr)
+library(readr)
+library(dplyr)
+
+# English/Non-English Speakers 
+IN_English <- read_csv("Downloads/ACSST5Y2020.S1601-2024-02-15T203240.csv")
+IN_English <- IN_English[-(4:26),]
+IN_English <- IN_English %>% dplyr::select(contains("Percent!!Estimate"))
+IN_English <- as.data.frame(t(IN_English))
+IN_English <- subset(IN_English, select = -c(1) )
+colnames(IN_English) <- c("% English", "% Non-English")
+IN_English$`% English` <- str_sub(IN_English$`% English`, end = -2)
+IN_English$`% Non-English` <- str_sub(IN_English$`% Non-English`, end = -2)
+IN_English <- lapply(IN_English, as.numeric)
+IN_English$`% English` <- IN_English$`% English`/100
+IN_English$`% Non-English` <- IN_English$`% Non-English`/100
+IN_English <- as.data.frame(IN_English)
+colnames(IN_English) <- c("% English", "% Non-English")
+
+# Unemployment
+IN_Unemployment <- read.csv("Downloads/ACSST5Y2020.S2301-2024-02-15T210616.csv")
+IN_Unemployment <- IN_Unemployment[-(2:41),]
+IN_Unemployment <- IN_Unemployment %>% dplyr::select(contains("Unemployment"))
+IN_Unemployment <- as.data.frame(t(IN_Unemployment))
+colnames(IN_Unemployment) <- ("% Unemployment")
+IN_Unemployment$`% Unemployment` <- str_sub(IN_Unemployment$`% Unemployment`, end = -2)
+IN_Unemployment <- lapply(IN_Unemployment, as.numeric)
+IN_Unemployment$`% Unemployment` <- IN_Unemployment$`% Unemployment`/100
+IN_Unemployment <- as.data.frame(IN_Unemployment)
+colnames(IN_Unemployment) <- ("% Unemployment")
+
+# Insured
+IN_Insurance <- read.csv("Downloads/ACSST5Y2020.S2701-2024-02-15T212843.csv")
+IN_Insurance <- IN_Insurance[-(2:72),]
+IN_Insured <- IN_Insurance %>% dplyr::select(contains("Percent.Insured"))
+IN_Insured <- as.data.frame(t(IN_Insured))
+colnames(IN_Insured) <- ("% Insured")
+IN_Insured$`% Insured` <- str_sub(IN_Insured$`% Insured`, end = -2)
+IN_Insured <- lapply(IN_Insured, as.numeric)
+IN_Insured$`% Insured` <- IN_Insured$`% Insured`/100
+IN_Insured <- as.data.frame(IN_Insured)
+colnames(IN_Insured) <- ("% Insured")
+
+# Uninsured
+IN_Uninsured <- IN_Insurance %>% dplyr::select(contains("Percent.Uninsured"))
+IN_Uninsured <- as.data.frame(t(IN_Uninsured))
+colnames(IN_Uninsured) <- ("% Uninsured")
+IN_Uninsured$`% Uninsured` <- str_sub(IN_Uninsured$`% Uninsured`, end = -2)
+IN_Uninsured <- lapply(IN_Uninsured, as.numeric)
+IN_Uninsured$`% Uninsured` <- IN_Uninsured$`% Uninsured`/100
+IN_Uninsured <- as.data.frame(IN_Uninsured)
+colnames(IN_Uninsured) <- ("% Uninsured")
+
+# Internet Subscription
+IN_Internet <- read_csv("Downloads/ACSST5Y2020.S2801-2024-02-15T214224.csv")
+IN_Internet <- IN_Internet[c(14, 21), ]
+IN_Internet <- IN_Internet %>% dplyr::select(contains("Percent"))
+IN_Internet <- as.data.frame(t(IN_Internet))
+colnames(IN_Internet) <- c("% Internet", "% Non-Internet")
+IN_Internet$`% Internet` <- str_sub(IN_Internet$`% Internet`, end = -3)
+IN_Internet$`% Non-Internet` <- str_sub(IN_Internet$`% Non-Internet`, end = -3)
+IN_Internet <- lapply(IN_Internet, as.numeric)
+IN_Internet$`% Internet` <- IN_Internet$`% Internet`/100
+IN_Internet$`% Non-Internet` <- IN_Internet$`% Non-Internet`/100
+IN_Internet <- as.data.frame(IN_Internet)
+colnames(IN_Internet) <- c("% Internet", "% Non-Internet")
+
+# Disability
+IN_Disability <- read_csv("Downloads/ACSST5Y2020.S1810-2024-02-15T221046.csv")
+IN_Disability <- IN_Disability[-(2:73),]
+IN_Disability <- IN_Disability %>% dplyr::select(contains("Percent"))
+IN_Disability <- as.data.frame(t(IN_Disability))
+colnames(IN_Disability) <- ("% Disability")
+IN_Disability$`% Disability` <- str_sub(IN_Disability$`% Disability`, end = -2)
+IN_Disability <- lapply(IN_Disability, as.numeric)
+IN_Disability$`% Disability` <- IN_Disability$`% Disability`/100
+IN_Disability <- as.data.frame(IN_Disability)
+colnames(IN_Disability) <- ("% Disability")
+
+# Land Area
+IN_Area <- data.frame("Land Area" = c(338.7, 657.2, 406.9, 406.4, 165.1, 422.9, 312.0, 372.2, 412.1, 372.5, 357.6, 405.1, 305.6, 429.5, 362.8, 305.1, 372.6, 392.1, 427.3, 463.2, 215.0, 148.5, 395.7, 384.4, 368.4, 487.4, 414.1, 542.5, 394.4, 306.0, 484.1, 406.9, 391.9, 293.1, 382.7, 510.0, 559.7, 383.9, 360.7, 376.6, 320.4, 515.8, 531.4, 379.6, 598.3, 498.9, 449.1, 451.9, 396.6, 443.6, 335.8, 373.8, 394.5, 504.6, 403.8, 401.8, 410.8, 86.2, 398.4, 385.3, 444.7, 381.7, 334.4, 418.1, 409.4, 433.7, 480.5, 452.4, 446.4, 408.1, 190.4, 411.1, 396.9, 457.8, 309.1, 308.8, 447.2, 220.7, 498.9, 260.5, 161.2, 233.4, 256.9, 403.6, 412.5, 364.7, 384.8, 513.7, 401.8, 368.1, 505.1, 335.6))
+
+# Bind all the datasets together
+IN_Dem_2 <- cbind(IN_English, IN_Unemployment, IN_Insured, IN_Uninsured, IN_Internet, IN_Disability, IN_Area)
+
+IN_Demographics <- cbind(IN_Demographics, IN_Dem_2)
+```
+
+```{r reading in political demographics data, include = FALSE}
+AllOfficeResults <- read_csv("Downloads/AllOfficeResults (1).csv")
+VoterStatistics <- read_csv("Downloads/VoterStatistics (1).csv")
+
+AllOfficeResults <- AllOfficeResults %>% filter(PoliticalParty == "Democratic" | PoliticalParty == "Republican") %>% filter(Office == "US President & Vice President")
+AllOfficeResults <- AllOfficeResults %>% dplyr::group_by(ReportingCountyName, PoliticalParty) %>% dplyr::summarize(TotalVotes = sum(TotalVotes))
+AllOfficeResults <- spread(AllOfficeResults, PoliticalParty, TotalVotes)
+colnames(AllOfficeResults)[1] <- "County"
+VoterStatistics <- VoterStatistics[-93, ]
+AllOfficeResults <- AllOfficeResults %>% mutate(County = replace(County, County == "Dekalb", "DeKalb")) %>% mutate(County = replace(County, County == "Lagrange", "LaGrange")) %>% mutate(County = replace(County, County == "Laporte", "LaPorte"))
+INPP <- merge(VoterStatistics, AllOfficeResults, by = "County")
+
+INPP$`Other Party` <- INPP$`Voters Voting` - INPP$`Democratic` - INPP$`Republican`
+INPP$`%Democratic` <- INPP$`Democratic` / INPP$`Voters Voting`
+INPP$`%Republican` <- INPP$`Republican` / INPP$`Voters Voting`
+INPP$`%OtherParty` <- INPP$`Other Party` / INPP$`Voters Voting`
+INPP <- INPP %>% arrange(County)
+
+#bind the demographics all together
+IN_Demographics <- cbind(IN_Demographics, INPP)
+IN_Demographics$fips <- str_sub(IN_Demographics$GEO_ID, -5)
+IN_Demographics$fips <- as.numeric(IN_Demographics$fips)
+
+IN_Demographics <- dplyr::select(IN_Demographics, -28:-37)
+IN_Demographics <- dplyr::select(IN_Demographics, -1:-2)
+
+IN_Demographics <- merge(IN_Demographics, ACS2020_IN_County_Population)
+
+# Population Density
+IN_Demographics$Pop_Density <- IN_Demographics$pop / IN_Demographics$Land.Area
+
+library(ggcorrplot)
+library(corrtable)
+IN_Demo_Corr <- dplyr::select(IN_Demographics, c(-1, -8, -10:-13, -16:-18, -21, -23, -26:-27, -29:-30, -31:-33))
+covariance_matrix <- cor(IN_Demo_Corr)
+corr_matrix <- ggcorrplot(covariance_matrix, method = "square", hc.order = TRUE, lab = TRUE, insig = "blank")
+correlation_matrix(IN_Demo_Corr)
+ggsave("demographics_correlation_matrix.png")
+
+IN_Demographics <- IN_Demographics %>% dplyr::select(-pop)
+IN_Demographics <- IN_Demographics %>% dplyr::select(-pop_rank)
+
+#remove the former demographic datasets + census data from global environment
+rm("VoterStatistics", "AllOfficeResults")
+rm("IN_Age_Race", "population_by_age", "population_by_education", "population_by_gender", "population_by_mhi", "population_by_poverty", "population_by_race")
+rm("df3", "df4", "df5", "IN_Ag", "IN_Ed", "IN_Ge", "IN_HH", "IN_Po", "INPP", "IN_Ra")
+```
+
+```{r other data prep, include = FALSE}
+#merge the demographics data to the time data
+IN_COVID_19_Data_Demographics <- merge(x = IN_COVID_19_Data, y = IN_Demographics, by = "fips", all.x = TRUE)
+IN_COVID_19_Data_Demographics <- IN_COVID_19_Data_Demographics %>% arrange(fips, date)
+#IN_COVID_19_Data_Demographics <- dplyr::select(IN_COVID_19_Data_Demographics, -53:-62)
+```
+
+```{r save the dataset, include = FALSE}
+#save(IN_COVID_19_Data_Demographics, file = 'IN COVID-19 Data Demographics.rda')
+```
+
+```{r load dataset, include = FALSE}
+#library(here)
+#load(here(file = 'IN COVID-19 Data Demographics.rda'))
+```
+
+```{r subset data, include = FALSE}
+#IN_COVID_19_Data_Demographics_04_06_2021 <- IN_COVID_19_Data_Demographics %>% filter(between(date, as.Date('2021-04-01'), as.Date('2021-06-30')))
+
+#write.csv(IN_COVID_19_Data_Demographics_04_06_2021, file = 'IN COVID-19 Data Demographics Apr-Jun.csv')
+```
+
+```{r convert to monthly counts, include = FALSE}
+IN_COVID_19_Data_Demographics$year <- format(IN_COVID_19_Data_Demographics$date, "%Y")
+IN_COVID_19_Data_Demographics$month <- format(IN_COVID_19_Data_Demographics$date, "%m")
+IN_COVID_19_Data_Demographics$day <- format(IN_COVID_19_Data_Demographics$date, "%d")
+
+#IN_COVID_19_Data_Demographics_Monthly <- IN_COVID_19_Data_Demographics %>%
+#                group_by(county_name) %>%
+#                mutate(total_cases_by_county_monthly = #cumsum(total_cases_by_county_daily)) %>%
+#                mutate(total_fv_by_county_monthly = #cumsum(total_fv_by_county_daily)) %>% 
+#  mutate(normalized_cases_by_county_monthly = #(total_cases_by_county_monthly/pop) * 100000) %>%
+#  mutate(cumulative_fv_by_county_monthly = cumsum(total_fv_by_county_daily)) %>% mutate(normalized_fv_by_county_monthly = (total_fv_by_county_monthly/pop) * 100000) %>% mutate(normalized_cumulative_fv_by_county_monthly = (cumulative_fv_by_county_monthly/pop) * 100000) %>%
+#  mutate(vaccine_rate = normalized_cumulative_fv_by_county_monthly / 100000)
+
+IN_COVID_19_Data_Demographics_Monthly <- IN_COVID_19_Data_Demographics %>%
+                group_by(county_name, year, month) %>%
+                mutate(total_cases_by_county_monthly = cumsum(total_cases_by_county_daily)) %>%
+  mutate(normalized_cases_by_county_monthly = (total_cases_by_county_monthly/pop) * 100000) %>% mutate(vaccine_rate = cumulative_fv_by_county / pop)
+
+IN_COVID_19_Data_Demographics_Monthly <- IN_COVID_19_Data_Demographics_Monthly %>%
+  dplyr::filter(day == max(day))
+
+temp <- IN_COVID_19_Data_Demographics_Monthly$vaccine_rate
+for (i in 1:length(temp)){
+  if (i %% 30 == 0)
+    temp[i] <- NA
+}
+
+temp <- c(NA, temp)
+temp <- temp[-2760]
+
+IN_COVID_19_Data_Demographics_Monthly$vaccine_rate_lag <- temp
+
+#save(IN_COVID_19_County_Data_Demographics_Monthly, file = 'IN COVID-19 Data Demographics Monthly.rda')
+```
+
+```{r create spatial stuff, include = FALSE}
+library(sf) 
+
+#This reads the shape file that we just put in the sf folder
+shape <- st_read("tl_2023_us_county/tl_2023_us_county.shp")
+
+#This extracts the shape elements specifically pertaining to Indiana.
+shape <- shape[shape$STATEFP == 18,]
+
+#This extracts the neighbor list for adjacent counties in Indiana.
+neighbors <- st_touches(shape, # first 
+                        shape, # second
+                        sparse = T)
+
+library(spdep)
+
+#neighbors is of type list.  We need to transform it to type nb (neighbor list)
+#to be used to create weights.
+class(neighbors) <- "nb"
+neighborList <- nb2listw(neighbors, style = "B")
+```
+
+```{r linear models, include = FALSE}
+#Create the linear model, not considering the spatial correlation.  You will either want to
+#use the standardized values (per 100,000) or you may have some transformations that you
+#will need to try on the Y variable later on.  You'll need
+#determine which variables you want to put in here.  You can use methods from ACMS 30600
+#to determine a good subset of variables (like stepAIC in the MASS package).  
+#You should also check for normality and heteroskedasticty in the residuals.  We did this
+#by graphing the predicted versus residual values and making sure it was "paint splatter".
+#You can also check the histogram of the residuals for normality or the QQplot. Focus
+#more on fixing the normality.  The spatial analysis will (hopefully) fix any left over
+#problems with unequal variances.
+
+IN_COVID_19_Data_Demographics_Monthly_1 <- IN_COVID_19_Data_Demographics_Monthly %>%
+  dplyr::filter(month == "01" & year == "2021")
+
+IN_COVID_19_Data_Demographics_Monthly_2 <- IN_COVID_19_Data_Demographics_Monthly %>%
+  dplyr::filter(month == "02" & year == "2021")
+
+IN_COVID_19_Data_Demographics_Monthly_3 <- IN_COVID_19_Data_Demographics_Monthly %>%
+  dplyr::filter(month == "03" & year == "2021")
+
+IN_COVID_19_Data_Demographics_Monthly_4 <- IN_COVID_19_Data_Demographics_Monthly %>%
+  dplyr::filter(month == "04" & year == "2021")
+
+IN_COVID_19_Data_Demographics_Monthly_5 <- IN_COVID_19_Data_Demographics_Monthly %>%
+  dplyr::filter(month == "05" & year == "2021")
+
+IN_COVID_19_Data_Demographics_Monthly_6 <- IN_COVID_19_Data_Demographics_Monthly %>%
+  dplyr::filter(month == "06" & year == "2021")
+
+IN_COVID_19_Data_Demographics_Monthly_7 <- IN_COVID_19_Data_Demographics_Monthly %>%
+  dplyr::filter(month == "07" & year == "2021")
+
+IN_COVID_19_Data_Demographics_Monthly_8 <- IN_COVID_19_Data_Demographics_Monthly %>%
+  dplyr::filter(month == "08" & year == "2021")
+
+IN_COVID_19_Data_Demographics_Monthly_9 <- IN_COVID_19_Data_Demographics_Monthly %>%
+  dplyr::filter(month == "09" & year == "2021")
+
+IN_COVID_19_Data_Demographics_Monthly_10 <- IN_COVID_19_Data_Demographics_Monthly %>%
+  dplyr::filter(month == "10" & year == "2021")
+
+IN_COVID_19_Data_Demographics_Monthly_11 <- IN_COVID_19_Data_Demographics_Monthly %>%
+  dplyr::filter(month == "11" & year == "2021")
+
+IN_COVID_19_Data_Demographics_Monthly_12 <- IN_COVID_19_Data_Demographics_Monthly %>%
+  dplyr::filter(month == "12" & year == "2021")
+
+model121c <- stepAIC(lm(normalized_cases_by_county_monthly ~ `%Male` + `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 18-39` + `% 40-59` + `% Over 60` + RUCA + `% Non-English` + `% Unemployment` + `% Uninsured` + `% Non-Internet` + `% Disability` + Pop_Density + vaccine_rate_lag, data = IN_COVID_19_Data_Demographics_Monthly_1))
+summary(model121c)
+#stepAIC(model121c)
+
+model221c <- stepAIC(lm(normalized_cases_by_county_monthly ~ `%Male` + `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 18-39` + `% 40-59` + `% Over 60` + RUCA + `% Non-English` + `% Unemployment` + `% Uninsured` + `% Non-Internet` + `% Disability` + Pop_Density + vaccine_rate_lag, data = IN_COVID_19_Data_Demographics_Monthly_2))
+summary(model221c)
+#stepAIC(model221c)
+
+model321c <- stepAIC(lm(normalized_cases_by_county_monthly ~ `%Male` + `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 18-39` + `% 40-59` + `% Over 60` + RUCA + `% Non-English` + `% Unemployment` + `% Uninsured` + `% Non-Internet` + `% Disability` + Pop_Density + vaccine_rate_lag, data = IN_COVID_19_Data_Demographics_Monthly_3))
+summary(model321c)
+#stepAIC(model321c)
+
+model421c <- stepAIC(lm(normalized_cases_by_county_monthly ~ `%Male` + `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 18-39` + `% 40-59` + `% Over 60` + RUCA + `% Non-English` + `% Unemployment` + `% Uninsured` + `% Non-Internet` + `% Disability` + Pop_Density + vaccine_rate_lag, data = IN_COVID_19_Data_Demographics_Monthly_4))
+summary(model421c)
+#stepAIC(model421c)
+
+model521c <- stepAIC(lm(normalized_cases_by_county_monthly ~ `%Male` + `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 18-39` + `% 40-59` + `% Over 60` + RUCA + `% Non-English` + `% Unemployment` + `% Uninsured` + `% Non-Internet` + `% Disability` + Pop_Density + vaccine_rate_lag, data = IN_COVID_19_Data_Demographics_Monthly_5))
+summary(model521c)
+#stepAIC(model521c)
+
+model621c <- stepAIC(lm(normalized_cases_by_county_monthly ~ `%Male` + `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 18-39` + `% 40-59` + `% Over 60` + RUCA + `% Non-English` + `% Unemployment` + `% Uninsured` + `% Non-Internet` + `% Disability` + Pop_Density + vaccine_rate_lag, data = IN_COVID_19_Data_Demographics_Monthly_6))
+summary(model621c)
+#stepAIC(model621c)
+
+model721c <- stepAIC(lm(normalized_cases_by_county_monthly ~ `%Male` + `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 18-39` + `% 40-59` + `% Over 60` + RUCA + `% Non-English` + `% Unemployment` + `% Uninsured` + `% Non-Internet` + `% Disability` + Pop_Density + vaccine_rate_lag, data = IN_COVID_19_Data_Demographics_Monthly_7))
+summary(model721c)
+#stepAIC(model721c)
+
+model821c <- stepAIC(lm(normalized_cases_by_county_monthly ~ `%Male` + `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 18-39` + `% 40-59` + `% Over 60` + RUCA + `% Non-English` + `% Unemployment` + `% Uninsured` + `% Non-Internet` + `% Disability` + Pop_Density + vaccine_rate_lag, data = IN_COVID_19_Data_Demographics_Monthly_8))
+summary(model821c)
+#stepAIC(model821c)
+
+model921c <- stepAIC(lm(normalized_cases_by_county_monthly ~ `%Male` + `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 18-39` + `% 40-59` + `% Over 60` + RUCA + `% Non-English` + `% Unemployment` + `% Uninsured` + `% Non-Internet` + `% Disability` + Pop_Density + vaccine_rate_lag, data = IN_COVID_19_Data_Demographics_Monthly_9))
+summary(model921c)
+#stepAIC(model921c)
+
+model1021c <- stepAIC(lm(normalized_cases_by_county_monthly ~ `%Male` + `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 18-39` + `% 40-59` + `% Over 60` + RUCA + `% Non-English` + `% Unemployment` + `% Uninsured` + `% Non-Internet` + `% Disability` + Pop_Density + vaccine_rate_lag, data = IN_COVID_19_Data_Demographics_Monthly_10))
+summary(model1021c)
+#stepAIC(model1021c)
+
+model1121c <- stepAIC(lm(normalized_cases_by_county_monthly ~ `%Male` + `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 18-39` + `% 40-59` + `% Over 60` + RUCA + `% Non-English` + `% Unemployment` + `% Uninsured` + `% Non-Internet` + `% Disability` + Pop_Density + vaccine_rate_lag, data = IN_COVID_19_Data_Demographics_Monthly_11))
+summary(model1121c)
+#stepAIC(model1121c)
+
+model1221c <- stepAIC(lm(normalized_cases_by_county_monthly ~ `%Male` + `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 18-39` + `% 40-59` + `% Over 60` + RUCA + `% Non-English` + `% Unemployment` + `% Uninsured` + `% Non-Internet` + `% Disability` + Pop_Density + vaccine_rate_lag, data = IN_COVID_19_Data_Demographics_Monthly_12))
+summary(model1221c)
+#stepAIC(model1221c)
+
+model121fv <- stepAIC(lm(normalized_cumulative_fv_by_county ~ `%Male` + `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 18-39` + `% 40-59` + `% Over 60` + RUCA + `% Non-English` + `% Unemployment` + `% Uninsured` + `% Non-Internet` + `% Disability` + Pop_Density, data = IN_COVID_19_Data_Demographics_Monthly_1))
+summary(model121fv)
+#stepAIC(model121fv)
+
+model221fv <- stepAIC(lm(normalized_cumulative_fv_by_county ~ `%Male` + `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 18-39` + `% 40-59` + `% Over 60` + RUCA + `% Non-English` + `% Unemployment` + `% Uninsured` + `% Non-Internet` + `% Disability` + Pop_Density, data = IN_COVID_19_Data_Demographics_Monthly_2))
+summary(model221fv)
+#stepAIC(model221fv)
+
+model321fv <- stepAIC(lm(normalized_cumulative_fv_by_county ~ `%Male` + `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 18-39` + `% 40-59` + `% Over 60` + RUCA + `% Non-English` + `% Unemployment` + `% Uninsured` + `% Non-Internet` + `% Disability` + Pop_Density, data = IN_COVID_19_Data_Demographics_Monthly_3))
+summary(model321fv)
+#stepAIC(model321fv)
+
+model421fv <- stepAIC(lm(normalized_cumulative_fv_by_county ~ `%Male` + `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 18-39` + `% 40-59` + `% Over 60` + RUCA + `% Non-English` + `% Unemployment` + `% Uninsured` + `% Non-Internet` + `% Disability` + Pop_Density, data = IN_COVID_19_Data_Demographics_Monthly_4))
+summary(model421fv)
+#stepAIC(model421fv)
+
+model521fv <- stepAIC(lm(normalized_cumulative_fv_by_county ~ `%Male` + `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 18-39` + `% 40-59` + `% Over 60` + RUCA + `% Non-English` + `% Unemployment` + `% Uninsured` + `% Non-Internet` + `% Disability` + Pop_Density, data = IN_COVID_19_Data_Demographics_Monthly_5))
+summary(model521fv)
+#stepAIC(model521fv)
+
+model621fv <- stepAIC(lm(normalized_cumulative_fv_by_county ~ `%Male` + `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 18-39` + `% 40-59` + `% Over 60` + RUCA + `% Non-English` + `% Unemployment` + `% Uninsured` + `% Non-Internet` + `% Disability` + Pop_Density, data = IN_COVID_19_Data_Demographics_Monthly_6))
+summary(model621fv)
+#stepAIC(model621fv)
+
+model721fv <- stepAIC(lm(normalized_cumulative_fv_by_county ~ `%Male` + `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 18-39` + `% 40-59` + `% Over 60` + RUCA + `% Non-English` + `% Unemployment` + `% Uninsured` + `% Non-Internet` + `% Disability` + Pop_Density, data = IN_COVID_19_Data_Demographics_Monthly_7))
+summary(model721fv)
+#stepAIC(model721fv)
+
+model821fv <- stepAIC(lm(normalized_cumulative_fv_by_county ~ `%Male` + `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 18-39` + `% 40-59` + `% Over 60` + RUCA + `% Non-English` + `% Unemployment` + `% Uninsured` + `% Non-Internet` + `% Disability` + Pop_Density, data = IN_COVID_19_Data_Demographics_Monthly_8))
+summary(model821fv)
+#stepAIC(model821fv)
+
+model921fv <- stepAIC(lm(normalized_cumulative_fv_by_county ~ `%Male` + `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 18-39` + `% 40-59` + `% Over 60` + RUCA + `% Non-English` + `% Unemployment` + `% Uninsured` + `% Non-Internet` + `% Disability` + Pop_Density, data = IN_COVID_19_Data_Demographics_Monthly_9))
+summary(model921fv)
+#stepAIC(model921fv)
+
+model1021fv <- stepAIC(lm(normalized_cumulative_fv_by_county ~ `%Male` + `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 18-39` + `% 40-59` + `% Over 60` + RUCA + `% Non-English` + `% Unemployment` + `% Uninsured` + `% Non-Internet` + `% Disability` + Pop_Density, data = IN_COVID_19_Data_Demographics_Monthly_10))
+summary(model1021fv)
+#stepAIC(model1021fv)
+
+model1121fv <- stepAIC(lm(normalized_cumulative_fv_by_county ~ `%Male` + `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 18-39` + `% 40-59` + `% Over 60` + RUCA + `% Non-English` + `% Unemployment` + `% Uninsured` + `% Non-Internet` + `% Disability` + Pop_Density, data = IN_COVID_19_Data_Demographics_Monthly_11))
+summary(model1121fv)
+#stepAIC(model1121fv)
+
+model1221fv <- stepAIC(lm(normalized_cumulative_fv_by_county ~ `%Male` + `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 18-39` + `% 40-59` + `% Over 60` + RUCA + `% Non-English` + `% Unemployment` + `% Uninsured` + `% Non-Internet` + `% Disability` + Pop_Density, data = IN_COVID_19_Data_Demographics_Monthly_12))
+summary(model1221fv)
+#stepAIC(model1221fv)
+
+IN_COVID_19_Data_Demographics_Monthly_2021 <- IN_COVID_19_Data_Demographics_Monthly %>%
+  dplyr::filter(year == "2021")
+
+model21c <- stepAIC(lm(normalized_cases_by_county_monthly ~ `%Male` + `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 18-39` + `% 40-59` + `% Over 60` + RUCA + `% Non-English` + `% Unemployment` + `% Uninsured` + `% Non-Internet` + `% Disability` + Pop_Density, data = IN_COVID_19_Data_Demographics_Monthly_2021))
+summary(model21c)
+#stepAIC(model21c)
+
+model21fv <- stepAIC(lm(normalized_cumulative_fv_by_county ~ `%Male` + `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 18-39` + `% 40-59` + `% Over 60` + RUCA + `% Non-English` + `% Unemployment` + `% Uninsured` + Pop_Density, data = IN_COVID_19_Data_Demographics_Monthly_2021))
+summary(model21fv)
+#summary(stepAIC(model21fv))
+```
+
+```{r summaries, echo = FALSE}
+summary(model121c)
+summary(model221c)
+summary(model321c)
+summary(model421c)
+summary(model521c)
+summary(model621c)
+summary(model721c)
+summary(model821c)
+summary(model921c)
+summary(model1021c)
+summary(model1121c)
+summary(model1221c)
+summary(model121fv)
+summary(model221fv)
+summary(model321fv)
+summary(model421fv)
+summary(model521fv)
+summary(model621fv)
+summary(model721fv)
+summary(model821fv)
+summary(model921fv)
+summary(model1021fv)
+summary(model1121fv)
+summary(model1221fv)
+summary(model21c)
+summary(model21fv)
+```
+
+```{r fitted vs residuals, echo = FALSE}
+plot(fitted.values(model121c), residuals(model121c))
+
+#The Moran Test will tell if there is correlation between observations.  This is like the Durbin
+#Watson test that we did in ACMS 30600, but that was for time series correlation.
+#If you see evidence for correlation (small p-value), this could be due to spatial, 
+#temporal or model misspecification.  However, you are going to take steps to mitigate as 
+#much model misspecification that you can.  There's not much we can do about the time 
+#series element though.  You will almost certainly find a small p-value which is what will
+#warrant our need to do a spatial analysis.
+lm.morantest(model121c, neighborList)
+lm.morantest(model221c, neighborList)
+lm.morantest(model321c, neighborList)
+lm.morantest(model421c, neighborList)
+lm.morantest(model521c, neighborList)
+lm.morantest(model621c, neighborList)
+lm.morantest(model721c, neighborList)
+lm.morantest(model821c, neighborList)
+lm.morantest(model921c, neighborList)
+lm.morantest(model121fv, neighborList)
+lm.morantest(model221fv, neighborList)
+lm.morantest(model321fv, neighborList)
+lm.morantest(model421fv, neighborList)
+lm.morantest(model521fv, neighborList)
+lm.morantest(model621fv, neighborList)
+lm.morantest(model721fv, neighborList)
+lm.morantest(model821fv, neighborList)
+lm.morantest(model921fv, neighborList)
+lm.morantest(model1021fv, neighborList)
+lm.morantest(model1121fv, neighborList)
+lm.morantest(model1221fv, neighborList)
+
+#Creates the correlogram for the neighbors, with a certain variable and number of lags.
+#You can change the variable that is used and the order/lag in this plot.  What this tells
+#us is how correlated counties are, that are 1 away (adjacent), or 2 away (not touching but close),
+#etc., based on the input variable.  What I saw with the given code is that the total
+#cases (for the day I selected) were correlated with counties that were adjacent, but not so
+#much with counties that were 2 or more away.
+plot(sp.correlogram(neighbours = neighbors, var = IN_COVID_19_Data_Demographics_Monthly_5$normalized_cumulative_fv_by_county, order = 4, method = "I", style = "C"))
+```
+
+```{r TUKEY, include = FALSE}
+# TukeyHSD - lm(vaccines ~ RUCA, data = 1 month)
+TukeyHSD(aov(lm(normalized_cumulative_fv_by_county ~ RUCA, data = IN_COVID_19_Data_Demographics_Monthly_5)))
+
+# mean by table
+IN_COVID_19_Data_Demographics_Monthly_1 %>% group_by(RUCA) %>% summarize(pov = mean(`% Unemployment`))
+```
+
+```{SAR, include = FALSE}
+library(spatialreg)
+#The spautolm function fits spatial regression models by maximum likelihood, 
+#by first finding the value of the spatial autoregressive coefficient, 
+#which maximizes the log likelihood function for the model family chosen, and then fitting
+#the other coefficients by generalized least squares at that point.
+
+#SAR model (Simultaneous Autoregressive Models)
+#weights are only needed if you don't account for population size.
+#If you do things on the per 100,000 residents scale, we won't need
+#to consider the weights variable.
+
+#Goal: look at the p-value for lambda.  If it is significant then this model recognizes
+#that there is spatial correlation and is able to model it.  The parameter estimates
+#for the other variables are then reasonable to interpret.  Even if it's not significant,
+#if the Moran test told us there was spatial correlation, this is better than nothing at all.
+sarModel_1c <- spautolm(normalized_cases_by_county_monthly ~ `%BelowPoverty` + RUCA + `% Uninsured` + vaccine_rate_lag, data = IN_COVID_19_Data_Demographics_Monthly_1, listw = neighborList)
+summary(sarModel_1c)
+
+sarModel_2c <- spautolm(normalized_cases_by_county_monthly ~ `% Uninsured` + `% Disability`, data = IN_COVID_19_Data_Demographics_Monthly_2, listw = neighborList)
+summary(sarModel_2c)
+
+sarModel_3c <- spautolm(normalized_cases_by_county_monthly ~ `%BelowPoverty` + `%CollegeEd` +  `%Republican` + `% 18-39` + `% 40-59` + `% Over 60` + `% Uninsured` + Pop_Density + vaccine_rate_lag, data = IN_COVID_19_Data_Demographics_Monthly_3, listw = neighborList)
+summary(sarModel_3c)
+
+sarModel_4c <- spautolm(normalized_cases_by_county_monthly ~ `%Republican` + `% Non-English` + `% Uninsured` + vaccine_rate_lag, data = IN_COVID_19_Data_Demographics_Monthly_4, listw = neighborList)
+summary(sarModel_4c)
+
+sarModel_5c <- spautolm(normalized_cases_by_county_monthly ~ `%BelowPoverty` +  `%Republican` + `% 18-39` + `% Uninsured` + vaccine_rate_lag, data = IN_COVID_19_Data_Demographics_Monthly_5, listw = neighborList)
+summary(sarModel_5c)
+
+sarModel_6c <- spautolm(normalized_cases_by_county_monthly ~ `%BelowPoverty` +  `%Republican` + `%NHWhite` +  `% Unemployment` + `% Non-Internet` +  Pop_Density, data = IN_COVID_19_Data_Demographics_Monthly_6, listw = neighborList)
+summary(sarModel_6c)
+
+sarModel_7c <- spautolm(normalized_cases_by_county_monthly ~ `%BelowPoverty` + `%CollegeEd` +   `%NHWhite` + `% Non-Internet`, data = IN_COVID_19_Data_Demographics_Monthly_7, listw = neighborList)
+summary(sarModel_7c)
+
+sarModel_8c <- spautolm(normalized_cases_by_county_monthly ~ `%BelowPoverty` + `%CollegeEd` +  `%Republican` + `%NHWhite` + `% 18-39` + RUCA + `% Unemployment` +  `% Non-Internet` + `% Disability` + Pop_Density + vaccine_rate_lag, data = IN_COVID_19_Data_Demographics_Monthly_8, listw = neighborList)
+summary(sarModel_8c)
+
+sarModel_9c <- spautolm(normalized_cases_by_county_monthly ~ `%BelowPoverty` + `%Republican` + `% 18-39` + `% 40-59` + `% Disability`, data = IN_COVID_19_Data_Demographics_Monthly_9, listw = neighborList)
+summary(sarModel_9c)
+
+-------------
+
+sarModel_1fv <- spautolm(normalized_cumulative_fv_by_county ~ `%CollegeEd` +  `%Republican` + `% 18-39` + `% Over 60` + RUCA + `% Non-English` + `% Unemployment`, data = IN_COVID_19_Data_Demographics_Monthly_1, listw = neighborList)
+summary(sarModel_1fv)
+
+sarModel_2fv <- spautolm(normalized_cumulative_fv_by_county ~ `%BelowPoverty` + `%CollegeEd` +  `%Republican` + `%NHWhite` + `% 18-39` + RUCA + `% Non-English`, data = IN_COVID_19_Data_Demographics_Monthly_2, listw = neighborList)
+summary(sarModel_2fv)
+
+sarModel_3fv <- spautolm(normalized_cumulative_fv_by_county ~ `%BelowPoverty` + `%CollegeEd` +  `%Republican` + `%NHWhite` + `% 18-39` + RUCA + `% Non-English` + `% Non-Internet`, data = IN_COVID_19_Data_Demographics_Monthly_3, listw = neighborList)
+summary(sarModel_3fv)
+
+sarModel_4fv <- spautolm(normalized_cumulative_fv_by_county ~ `%BelowPoverty` + `%CollegeEd` +  `%Republican` + `%NHWhite` + `% 40-59` + `% Non-English` + `% Unemployment`, data = IN_COVID_19_Data_Demographics_Monthly_4, listw = neighborList)
+summary(sarModel_4fv)
+
+sarModel_5fv <- spautolm(normalized_cumulative_fv_by_county ~ `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 40-59` + RUCA + `% Unemployment` + `% Uninsured` + Pop_Density, data = IN_COVID_19_Data_Demographics_Monthly_5, listw = neighborList)
+summary(sarModel_5fv)
+
+sarModel_6fv <- spautolm(normalized_cumulative_fv_by_county ~ `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 40-59` + RUCA + `% Unemployment` + `% Uninsured` + Pop_Density, data = IN_COVID_19_Data_Demographics_Monthly_6, listw = neighborList)
+summary(sarModel_6fv)
+
+sarModel_7fv <- spautolm(normalized_cumulative_fv_by_county ~ `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 40-59` + RUCA + `% Unemployment` + `% Uninsured` + Pop_Density, data = IN_COVID_19_Data_Demographics_Monthly_7, listw = neighborList)
+summary(sarModel_7fv)
+
+sarModel_8fv <- spautolm(normalized_cumulative_fv_by_county ~ `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 40-59` + RUCA + `% Unemployment` + `% Uninsured` + Pop_Density, data = IN_COVID_19_Data_Demographics_Monthly_8, listw = neighborList)
+summary(sarModel_8fv)
+
+sarModel_9fv <- spautolm(normalized_cumulative_fv_by_county ~ `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 40-59` + RUCA + `% Unemployment` + `% Uninsured` + Pop_Density, data = IN_COVID_19_Data_Demographics_Monthly_9, listw = neighborList)
+summary(sarModel_9fv)
+
+# CAR
+#CAR model (Conditional Autoregressive Models)
+carModel <- spautolm(normalized_cases_by_county_monthly ~ `%BelowPoverty` + `%CollegeEd` +  `%Republican` + `%NHWhite` + `% 18-39` + `% 40-59` + `% Over 60` + RUCA + `% Non-English` + `% Unemployment` + `% Uninsured` + `% Non-Internet` + `% Disability` + Pop_Density, data = IN_COVID_19_Data_Demographics_Monthly_1, listw = neighborList, family = "CAR")
+summary(carModel)
+
+carModel_1c <- spautolm(normalized_cases_by_county_monthly ~ `%BelowPoverty` + RUCA + `% Uninsured` + vaccine_rate_lag, data = IN_COVID_19_Data_Demographics_Monthly_1, listw = neighborList, family = "CAR")
+summary(carModel_1c)
+
+carModel_2c <- spautolm(normalized_cases_by_county_monthly ~ `% Uninsured` + `% Disability`, data = IN_COVID_19_Data_Demographics_Monthly_2, listw = neighborList, family = "CAR")
+summary(carModel_2c)
+
+carModel_3c <- spautolm(normalized_cases_by_county_monthly ~ `%BelowPoverty` + `%CollegeEd` +  `%Republican` + `% 18-39` + `% 40-59` + `% Over 60` + `% Uninsured` + Pop_Density + vaccine_rate_lag, data = IN_COVID_19_Data_Demographics_Monthly_3, listw = neighborList, family = "CAR")
+summary(carModel_3c)
+
+carModel_4c <- spautolm(normalized_cases_by_county_monthly ~ `%Republican` + `% Non-English` + `% Uninsured` + vaccine_rate_lag, data = IN_COVID_19_Data_Demographics_Monthly_4, listw = neighborList, family = "CAR")
+summary(carModel_4c)
+
+carModel_5c <- spautolm(normalized_cases_by_county_monthly ~ `%BelowPoverty` +  `%Republican` + `% 18-39` + `% Uninsured` + vaccine_rate_lag, data = IN_COVID_19_Data_Demographics_Monthly_5, listw = neighborList, family = "CAR")
+summary(carModel_5c)
+
+carModel_6c <- spautolm(normalized_cases_by_county_monthly ~ `%BelowPoverty` +  `%Republican` + `%NHWhite` +  `% Unemployment` + `% Non-Internet` +  Pop_Density, data = IN_COVID_19_Data_Demographics_Monthly_6, listw = neighborList, family = "CAR")
+summary(carModel_6c)
+
+carModel_7c <- spautolm(normalized_cases_by_county_monthly ~ `%BelowPoverty` + `%CollegeEd` +   `%NHWhite` + `% Non-Internet`, data = IN_COVID_19_Data_Demographics_Monthly_7, listw = neighborList, family = "CAR")
+summary(carModel_7c)
+
+carModel_8c <- spautolm(normalized_cases_by_county_monthly ~ `%BelowPoverty` + `%CollegeEd` +  `%Republican` + `%NHWhite` + `% 18-39` + RUCA + `% Unemployment` +  `% Non-Internet` + `% Disability` + Pop_Density + vaccine_rate_lag, data = IN_COVID_19_Data_Demographics_Monthly_8, listw = neighborList, family = "CAR")
+summary(carModel_8c)
+
+carModel_9c <- spautolm(normalized_cases_by_county_monthly ~ `%BelowPoverty` + `%Republican` + `% 18-39` + `% 40-59` + `% Disability`, data = IN_COVID_19_Data_Demographics_Monthly_9, listw = neighborList, family = "CAR")
+summary(carModel_9c)
+
+-------------
+
+carModel_1fv <- spautolm(normalized_cumulative_fv_by_county ~ `%CollegeEd` +  `%Republican` + `% 18-39` + `% Over 60` + RUCA + `% Non-English` + `% Unemployment`, data = IN_COVID_19_Data_Demographics_Monthly_1, listw = neighborList, family = "CAR")
+summary(carModel_1fv)
+
+carModel_2fv <- spautolm(normalized_cumulative_fv_by_county ~ `%BelowPoverty` + `%CollegeEd` +  `%Republican` + `%NHWhite` + `% 18-39` + RUCA + `% Non-English`, data = IN_COVID_19_Data_Demographics_Monthly_2, listw = neighborList, family = "CAR")
+summary(carModel_2fv)
+
+carModel_3fv <- spautolm(normalized_cumulative_fv_by_county ~ `%BelowPoverty` + `%CollegeEd` +  `%Republican` + `%NHWhite` + `% 18-39` + RUCA + `% Non-English` + `% Non-Internet`, data = IN_COVID_19_Data_Demographics_Monthly_3, listw = neighborList, family = "CAR")
+summary(carModel_3fv)
+
+carModel_4fv <- spautolm(normalized_cumulative_fv_by_county ~ `%BelowPoverty` + `%CollegeEd` +  `%Republican` + `%NHWhite` + `% 40-59` + `% Non-English` + `% Unemployment`, data = IN_COVID_19_Data_Demographics_Monthly_4, listw = neighborList, family = "CAR")
+summary(carModel_4fv)
+
+carModel_5fv <- spautolm(normalized_cumulative_fv_by_county ~ `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 40-59` + RUCA + `% Unemployment` + `% Uninsured` + Pop_Density, data = IN_COVID_19_Data_Demographics_Monthly_5, listw = neighborList, family = "CAR")
+summary(carModel_5fv)
+
+carModel_6fv <- spautolm(normalized_cumulative_fv_by_county ~ `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 40-59` + RUCA + `% Unemployment` + `% Uninsured` + Pop_Density, data = IN_COVID_19_Data_Demographics_Monthly_6, listw = neighborList, family = "CAR")
+summary(carModel_6fv)
+
+carModel_7fv <- spautolm(normalized_cumulative_fv_by_county ~ `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 40-59` + RUCA + `% Unemployment` + `% Uninsured` + Pop_Density, data = IN_COVID_19_Data_Demographics_Monthly_7, listw = neighborList, family = "CAR")
+summary(carModel_7fv)
+
+carModel_8fv <- spautolm(normalized_cumulative_fv_by_county ~ `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 40-59` + RUCA + `% Unemployment` + `% Uninsured` + Pop_Density, data = IN_COVID_19_Data_Demographics_Monthly_8, listw = neighborList, family = "CAR")
+summary(carModel_8fv)
+
+carModel_9fv <- spautolm(normalized_cumulative_fv_by_county ~ `%BelowPoverty` + `%CollegeEd` + `%Republican` + `%NHWhite` + `% 40-59` + RUCA + `% Unemployment` + `% Uninsured` + Pop_Density, data = IN_COVID_19_Data_Demographics_Monthly_9, listw = neighborList, family = "CAR")
+summary(carModel_9fv)
+#Use the AIC of these two models to determine which is better.  Smaller AIC is better.
+```
+
+```{r set up maps, include = FALSE}
+library(sf)           # Objects and functions for geospatial data
+library(rgdal)        # Functions for spatial data input/output
+library(ggplot2)      # Graphing functions
+library(dplyr)        # Functions for processing tabular data
+library(tidyr)        # Functions for processing tabular data
+library(scales)       # Additional graphics functions
+library(RColorBrewer) # Color ramps for graphs and maps
+library(gridExtra)    # Functions for arranging multiple plots on a page
+library(readr)        # Functions for reading data
+library(ggmap)
+library(ggplot2)
+library(raster)
+library(maptools)
+library(broom)
+library(table1)
+library(maps)
+library(cowplot)
+library(googleway)
+library(ggrepel)
+library(ggspatial)
+#library(libwgeom)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(tools)
+
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+states <- st_as_sf(maps::map("state", plot = FALSE, fill = TRUE))
+states <- cbind(states, sf::st_coordinates(sf::st_point_on_surface(states)))
+states$ID <- toTitleCase(states$ID)
+
+counties <- st_as_sf(maps::map("county", plot = FALSE, fill = TRUE))
+counties <- subset(counties, grepl("indiana", counties$ID))
+counties <- counties[-(93),]
+counties$area <- as.numeric(st_area(counties))
+
+counties <- cbind(counties, IN_Demographics, check.names = FALSE)
+
+IN_cities <- data.frame(state = rep("Indiana", 13), city = c("Indianapolis", "Fort Wayne", "South Bend", "Evansville", "Lafayette", "Bloomington", "Hammond", "Terre Haute", "Louisville, KY", "Muncie", "Fishers", "Carmel", "Gary"), lat = c(39.791000, 41.093842, 41.676388, 37.977222, 40.416702, 39.168804, 41.584660, 39.472298, 38.328732, 40.191891, 39.956779, 39.978371, 41.595161), lng = c(-86.148003, -85.139236, -86.250275, -87.550552, -86.875290, -86.536659, -87.500160, -87.401917, -85.764771, -85.401695, -86.015549, -86.118042, -87.356934))
+
+IN_cities <- st_as_sf(IN_cities, coords = c("lng", "lat"), remove = FALSE, 
+    crs = 4326, agr = "constant")
+
+IN_education_map <- ggplot(data = states) +
+    geom_sf(data = counties, aes(geometry = geom, fill = `%CollegeEd`)) +
+    geom_sf(data = IN_cities) +
+    geom_label_repel(data = IN_cities, aes(x = lng, y = lat, label = city), 
+    fontface = "bold") +
+    geom_sf(data = counties, fill = NA, color = gray(.5)) +
+    coord_sf(xlim = c(-88.5, -84.5), ylim = c(37.5, 42), expand = FALSE) +
+  scale_fill_gradientn(colors = hcl.colors(9, palette = "Blues"), name="Prop. College Educated", trans = "reverse")+
+  theme(axis.line = element_blank(),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+                panel.background = element_blank(),
+        legend.text = element_text(size = 8),
+        legend.position = "bottom",
+        legend.direction = "horizontal",
+        legend.key.width = unit(0.5, "cm"),
+        title = element_text(size = 8, face = "bold")) +
+  labs(title = "(A) Proportion of College Educated Adults in Indiana")
+
+ggsave("indiana_education_map.jpeg")
+```
+
+
+```{r maps for vaccination coverage, echo = FALSE, fig.cap = "Map of Indiana COVID-19 % College Ed"}
+IN_republican_map <- ggplot(data = states) +
+    geom_sf(data = counties, aes(geometry = geom, fill = `%Republican`)) +
+    geom_sf(data = IN_cities) +
+    geom_label_repel(data = IN_cities, aes(x = lng, y = lat, label = city), 
+    fontface = "bold") +
+    geom_sf(data = counties, fill = NA, color = gray(.5)) +
+    coord_sf(xlim = c(-88.5, -84.5), ylim = c(37.5, 42), expand = FALSE) +
+  scale_fill_gradientn(colors = hcl.colors(7, palette = "Purples"), name="Prop. Republican", trans = "reverse")+
+  theme(axis.line = element_blank(),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+                panel.background = element_blank(),
+        legend.text = element_text(size = 8),
+        legend.position = "bottom",
+        legend.direction = "horizontal",
+        legend.key.width = unit(0.5, "cm"),
+        title = element_text(size = 8, face = "bold")) +
+  labs(title = "(B) Proportion of Republican Voters in Indiana")
+
+ggsave("indiana_republican_map.jpeg")
+```
+
+```{r maps for vaccination coverage, echo = FALSE, fig.cap = "Map of Indiana COVID-19 Race"}
+IN_race_map <- ggplot(data = states) +
+    geom_sf(data = counties, aes(geometry = geom, fill = `%NHWhite`)) +
+    geom_sf(data = IN_cities) +
+    geom_label_repel(data = IN_cities, aes(x = lng, y = lat, label = city), 
+    fontface = "bold") +
+    geom_sf(data = counties, fill = NA, color = gray(.5)) +
+    coord_sf(xlim = c(-88.5, -84.5), ylim = c(37.5, 42), expand = FALSE) +
+  scale_fill_gradientn(colors = hcl.colors(9, palette = "Oranges"), name="Prop. Non-Hispanic White", trans = "reverse")+
+  theme(axis.line = element_blank(),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+                panel.background = element_blank(),
+        legend.text = element_text(size = 8),
+        legend.position = "bottom",
+        legend.direction = "horizontal",
+        legend.key.width = unit(0.5, "cm"),
+        title = element_text(size = 7, face = "bold")) +
+  labs(title = "(B) Proportion of Non-Hispanic White in Indiana")
+
+ggsave("indiana_race_map.jpeg")
+```
+
+```{r IN Vaccination Map, include = FALSE}
+#vax map
+counties$prop_cumulative_fv <- IN_COVID_19_Data_Demographics_Monthly_12$prop_cumulative_fv_by_county
+
+IN_vax_map <- ggplot(data = states) +
+    geom_sf(data = counties, aes(geometry = geom, fill = `prop_cumulative_fv`)) +
+    geom_sf(data = IN_cities) +
+    geom_label_repel(data = IN_cities, aes(x = lng, y = lat, label = city), 
+    fontface = "bold") +
+    geom_sf(data = counties, fill = NA, color = gray(.5)) +
+    coord_sf(xlim = c(-88.5, -84.5), ylim = c(37.5, 42), expand = FALSE) +
+  scale_fill_gradientn(colors = hcl.colors(9, palette = "Greens"), name="Prop. Cumul. Fully Vax", trans = "reverse")+
+  theme(axis.line = element_blank(),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+                panel.background = element_blank(),
+        legend.text = element_text(size = 8),
+        legend.position = "bottom",
+        legend.direction = "horizontal",
+        legend.key.width = unit(0.5, "cm"),
+        title = element_text(size = 8, face = "bold")) +
+  labs(title = "(A) Proportion of Fully Vaccinated in Indiana")
+
+ggsave("indiana_vax_map.jpeg")
+```
+
+```{r IN Vaccination Map, include = FALSE}
+#vax map
+counties$RUCC <- IN_COVID_19_Data_Demographics_Monthly_12$RUCA
+library(viridis)
+
+IN_rurality_map <- ggplot(data = states) +
+    geom_sf(data = counties, aes(geometry = geom, fill = `RUCC`)) +
+    geom_sf(data = IN_cities) +
+    geom_label_repel(data = IN_cities, aes(x = lng, y = lat, label = city), 
+    fontface = "bold") +
+    geom_sf(data = counties, fill = NA, color = gray(.5)) +
+    coord_sf(xlim = c(-88.5, -84.5), ylim = c(37.5, 42), expand = FALSE) +
+  scale_fill_viridis(discrete = TRUE, direction = -1) +
+  theme(axis.line = element_blank(),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+                panel.background = element_blank(),
+        legend.text = element_text(size = 8),
+        legend.position = "bottom",
+        legend.direction = "horizontal",
+        legend.key.width = unit(0.5, "cm"),
+        title = element_text(size = 8, face = "bold")) +
+  labs(title = "(B) Indiana Rurality Map")
+
+ggsave("indiana_rurality_map.jpeg")
+```
+
+```{r test map, include = FALSE}
+IN_poverty_map <- ggplot(data = states) +
+    geom_sf(data = counties, aes(geometry = geom, fill = `%BelowPoverty`)) +
+    geom_sf(data = IN_cities) +
+    geom_label_repel(data = IN_cities, aes(x = lng, y = lat, label = city), 
+    fontface = "bold") +
+    geom_sf(data = counties, fill = NA, color = gray(.5)) +
+    coord_sf(xlim = c(-88.5, -84.5), ylim = c(37.5, 42), expand = FALSE) +
+  scale_fill_gradientn(colors = hcl.colors(9, palette = "Reds"), name="Prop. Below Poverty", trans = "reverse") + 
+  theme(axis.line = element_blank(),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+                panel.background = element_blank(),
+        legend.text = element_text(size = 8),
+        legend.position = "bottom",
+        legend.direction = "horizontal",
+        legend.key.width = unit(0.5, "cm"),
+        title = element_text(size = 8, face = "bold")) +
+  labs(title = "(A) Proportion of Below Poverty in Indiana")
+
+ggsave("indiana_poverty_map.jpeg")
+```
+
+
+```{r plot both maps side by side}
+library(gridExtra)
+IN_maps <- gridExtra::grid.arrange(IN_vax_map, IN_rurality_map, ncol = 2) 
+ggsave("indiana_maps.jpeg", IN_maps)
+
+IN_maps_2 <- gridExtra::grid.arrange(IN_education_map, IN_republican_map, ncol = 2) 
+ggsave("indiana_maps_2.jpeg", IN_maps_2)
+
+IN_maps_3 <- gridExtra::grid.arrange(IN_poverty_map, IN_race_map, ncol = 2) 
+ggsave("indiana_maps_3.jpeg", IN_maps_3)
+```
